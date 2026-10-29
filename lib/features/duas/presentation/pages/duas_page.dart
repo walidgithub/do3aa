@@ -1,5 +1,6 @@
 
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -27,11 +28,14 @@ class _DuasPageState extends State<DuasPage> {
   int? lastReadDuaId;
   String _searchQuery = '';
 
-  // سرعة التمرير بوحدة بكسل في الثانية.
   double _scrollSpeed = 20;
 
   bool _isAutoScrolling = false;
   bool _isScrollLoopRunning = false;
+
+  // الأدوات مخفية افتراضيًا.
+  bool _showSearch = false;
+  bool _showScrollControls = false;
 
   @override
   void initState() {
@@ -83,10 +87,35 @@ class _DuasPageState extends State<DuasPage> {
     );
   }
 
+  void _toggleSearch() {
+    if (_showSearch) {
+      _searchController.clear();
+      _pauseAutoScroll();
+
+      setState(() {
+        _showSearch = false;
+        _searchQuery = '';
+      });
+    } else {
+      setState(() {
+        _showSearch = true;
+      });
+    }
+  }
+
+  void _toggleScrollControls() {
+    setState(() {
+      _showScrollControls = !_showScrollControls;
+    });
+  }
+
   Future<void> _scrollToLastReadDua() async {
     if (lastReadDuaId == null) return;
 
-    // نزيل البحث مؤقتًا حتى يظهر الدعاء المحفوظ.
+    final state = context.read<DuaCubit>().state;
+    if (state is! DuaLoaded) return;
+
+    // إظهار الدعاء حتى لو كان البحث يخفيه.
     if (_searchQuery.isNotEmpty) {
       _searchController.clear();
 
@@ -97,61 +126,76 @@ class _DuasPageState extends State<DuasPage> {
       await WidgetsBinding.instance.endOfFrame;
     }
 
-    final key = _duaKeys[lastReadDuaId!];
-    final targetContext = key?.currentContext;
+    if (!mounted || !_scrollController.hasClients) return;
+
+    final targetIndex = state.duas.indexWhere(
+          (dua) => dua.id == lastReadDuaId,
+    );
+
+    if (targetIndex == -1) return;
+
+    final targetKey = _duaKeys[lastReadDuaId!];
+    final targetContext = targetKey?.currentContext;
 
     if (targetContext != null) {
       await Scrollable.ensureVisible(
         targetContext,
-        duration: const Duration(milliseconds: 600),
+        duration: const Duration(milliseconds: 500),
         curve: Curves.easeInOut,
-        alignment: 0.2,
+        alignment: 0.15,
       );
       return;
     }
 
-    // إذا لم يكن العنصر مبنيًا بعد، نمرر القائمة تدريجيًا
-    // حتى يظهر، ثم ننتقل إليه بدقة.
-    if (!_scrollController.hasClients) return;
+    // محاولة الوصول إلى العنصر بالتدريج.
+    for (int attempt = 0; attempt < 200; attempt++) {
+      if (!mounted || !_scrollController.hasClients) return;
 
-    final state = context.read<DuaCubit>().state;
-    if (state is! DuaLoaded) return;
+      final itemContext =
+          _duaKeys[lastReadDuaId!]?.currentContext;
 
-    final allDuas = state.duas;
-    final targetIndex = allDuas.indexWhere(
-          (dua) => dua.id == lastReadDuaId,
-    );
+      if (itemContext != null) {
+        await Scrollable.ensureVisible(
+          itemContext,
+          duration: const Duration(milliseconds: 500),
+          curve: Curves.easeInOut,
+          alignment: 0.15,
+        );
+        return;
+      }
 
-    if (targetIndex < 0) return;
+      final position = _scrollController.position;
+      final remaining =
+          position.maxScrollExtent - position.pixels;
 
-    final estimatedItemHeight =
-        MediaQuery.sizeOf(context).height * 0.65;
+      if (remaining <= 0) break;
 
-    final estimatedOffset =
-    (targetIndex * estimatedItemHeight).clamp(
-      0.0,
-      _scrollController.position.maxScrollExtent,
-    );
-
-    await _scrollController.animateTo(
-      estimatedOffset,
-      duration: const Duration(milliseconds: 700),
-      curve: Curves.easeInOut,
-    );
-
-    await WidgetsBinding.instance.endOfFrame;
-
-    final newContext =
-        _duaKeys[lastReadDuaId!]?.currentContext;
-
-    if (newContext != null) {
-      await Scrollable.ensureVisible(
-        newContext,
-        duration: const Duration(milliseconds: 400),
-        curve: Curves.easeInOut,
-        alignment: 0.2,
+      final step = math.max(
+        100.0,
+        position.viewportDimension * 0.7,
       );
+
+      await _scrollController.animateTo(
+        math.min(
+          position.pixels + step,
+          position.maxScrollExtent,
+        ),
+        duration: const Duration(milliseconds: 120),
+        curve: Curves.linear,
+      );
+
+      await WidgetsBinding.instance.endOfFrame;
     }
+
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'تعذر الوصول إلى الدعاء المحفوظ. حاول مرة أخرى.',
+        ),
+      ),
+    );
   }
 
   Future<void> _startAutoScroll() async {
@@ -193,8 +237,7 @@ class _DuasPageState extends State<DuasPage> {
         _scrollController.jumpTo(nextOffset);
       }
     } catch (_) {
-      // قد يتغير موضع القائمة أثناء تحديث نتائج البحث.
-      // نوقف التمرير بأمان إذا لم يعد موضع التمرير متاحًا.
+      // إيقاف آمن إذا تغير موضع التمرير أثناء الحركة.
     } finally {
       _isScrollLoopRunning = false;
 
@@ -220,7 +263,6 @@ class _DuasPageState extends State<DuasPage> {
     }
 
     if (_scrollController.hasClients) {
-      // يوقف الحركة عند موضعها الحالي دون الرجوع إلى البداية.
       _scrollController.jumpTo(
         _scrollController.position.pixels,
       );
@@ -306,6 +348,24 @@ class _DuasPageState extends State<DuasPage> {
         title: const Text('الأدعية'),
         centerTitle: true,
         actions: [
+          IconButton(
+            onPressed: _toggleSearch,
+            tooltip: _showSearch ? 'إخفاء البحث' : 'البحث',
+            icon: Icon(
+              _showSearch ? Icons.search_off : Icons.search,
+            ),
+          ),
+          IconButton(
+            onPressed: _toggleScrollControls,
+            tooltip: _showScrollControls
+                ? 'إخفاء أدوات التمرير'
+                : 'أدوات التمرير',
+            icon: Icon(
+              _showScrollControls
+                  ? Icons.slow_motion_video
+                  : Icons.play_circle_outline,
+            ),
+          ),
           if (lastReadDuaId != null)
             IconButton(
               onPressed: _scrollToLastReadDua,
@@ -342,102 +402,109 @@ class _DuasPageState extends State<DuasPage> {
 
           return Column(
             children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-                child: TextField(
-                  controller: _searchController,
-                  textDirection: TextDirection.rtl,
-                  decoration: InputDecoration(
-                    hintText: 'ابحث عن دعاء...',
-                    prefixIcon: const Icon(Icons.search),
-                    suffixIcon: _searchQuery.isNotEmpty
-                        ? IconButton(
-                      tooltip: 'مسح البحث',
-                      onPressed: () {
-                        _searchController.clear();
-                        setState(() {
-                          _searchQuery = '';
-                        });
-                      },
-                      icon: const Icon(Icons.close),
-                    )
-                        : null,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(14),
+              // البحث لا يظهر إلا عند الضغط على أيقونته.
+              if (_showSearch)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                  child: TextField(
+                    controller: _searchController,
+                    autofocus: true,
+                    textDirection: TextDirection.rtl,
+                    decoration: InputDecoration(
+                      hintText: 'ابحث عن دعاء...',
+                      prefixIcon: const Icon(Icons.search),
+                      suffixIcon: _searchQuery.isNotEmpty
+                          ? IconButton(
+                        tooltip: 'مسح البحث',
+                        onPressed: () {
+                          _searchController.clear();
+                          setState(() {
+                            _searchQuery = '';
+                          });
+                        },
+                        icon: const Icon(Icons.close),
+                      )
+                          : null,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      isDense: true,
                     ),
-                    isDense: true,
+                    onChanged: (value) {
+                      _pauseAutoScroll();
+                      setState(() {
+                        _searchQuery = value;
+                      });
+                    },
                   ),
-                  onChanged: (value) {
-                    _pauseAutoScroll();
-                    setState(() {
-                      _searchQuery = value;
-                    });
-                  },
                 ),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 4,
+
+              // أدوات التمرير مخفية افتراضيًا.
+              if (_showScrollControls)
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 4,
+                  ),
+                  child: Column(
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.slow_motion_video),
+                          const SizedBox(width: 8),
+                          const Expanded(
+                            child: Text('سرعة التمرير'),
+                          ),
+                          Text(
+                            '${_scrollSpeed.round()}',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                      Slider(
+                        min: 5,
+                        max: 80,
+                        divisions: 15,
+                        value: _scrollSpeed,
+                        label: '${_scrollSpeed.round()}',
+                        onChanged: (value) {
+                          setState(() {
+                            _scrollSpeed = value;
+                          });
+                        },
+                      ),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          FilledButton.icon(
+                            onPressed: _isAutoScrolling
+                                ? _pauseAutoScroll
+                                : _startAutoScroll,
+                            icon: Icon(
+                              _isAutoScrolling
+                                  ? Icons.pause
+                                  : Icons.play_arrow,
+                            ),
+                            label: Text(
+                              _isAutoScrolling
+                                  ? 'إيقاف مؤقت'
+                                  : 'تشغيل التمرير',
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          OutlinedButton.icon(
+                            onPressed: _stopAutoScroll,
+                            icon: const Icon(Icons.stop),
+                            label: const Text('إيقاف'),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
-                child: Column(
-                  children: [
-                    Row(
-                      children: [
-                        const Icon(Icons.slow_motion_video),
-                        const SizedBox(width: 8),
-                        const Expanded(
-                          child: Text('سرعة التمرير'),
-                        ),
-                        Text(
-                          '${_scrollSpeed.round()}',
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    ),
-                    Slider(
-                      min: 5,
-                      max: 80,
-                      divisions: 15,
-                      value: _scrollSpeed,
-                      label: '${_scrollSpeed.round()}',
-                      onChanged: (value) {
-                        setState(() {
-                          _scrollSpeed = value;
-                        });
-                      },
-                    ),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        FilledButton.icon(
-                          onPressed: _isAutoScrolling
-                              ? _pauseAutoScroll
-                              : _startAutoScroll,
-                          icon: Icon(
-                            _isAutoScrolling
-                                ? Icons.pause
-                                : Icons.play_arrow,
-                          ),
-                          label: Text(
-                            _isAutoScrolling
-                                ? 'إيقاف مؤقت'
-                                : 'تشغيل التمرير',
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        OutlinedButton.icon(
-                          onPressed: _stopAutoScroll,
-                          icon: const Icon(Icons.stop),
-                          label: const Text('إيقاف'),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
+
               if (_searchQuery.trim().isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.symmetric(
@@ -452,7 +519,9 @@ class _DuasPageState extends State<DuasPage> {
                     ),
                   ),
                 ),
+
               const Divider(height: 1),
+
               Expanded(
                 child: filteredDuas.isEmpty
                     ? const Center(
@@ -464,8 +533,6 @@ class _DuasPageState extends State<DuasPage> {
                   buildDefaultDragHandles: false,
                   itemCount: filteredDuas.length,
                   onReorder: (oldIndex, newIndex) {
-                    // لا نعيد ترتيب القائمة الأصلية باستخدام
-                    // مؤشرات نتائج البحث.
                     if (_searchQuery.trim().isNotEmpty) {
                       return;
                     }
@@ -484,8 +551,7 @@ class _DuasPageState extends State<DuasPage> {
                       );
                     }
 
-                    final originalIndex =
-                    allDuas.indexWhere(
+                    final originalIndex = allDuas.indexWhere(
                           (item) => item.id == dua.id,
                     );
 
@@ -503,8 +569,7 @@ class _DuasPageState extends State<DuasPage> {
                         dragIndex: index,
                         canReorder:
                         _searchQuery.trim().isEmpty,
-                        isLastRead:
-                        dua.id == lastReadDuaId,
+                        isLastRead: dua.id == lastReadDuaId,
                         onTap: () => _markAsLastRead(dua),
                         onEdit: () => _openEditDua(dua),
                         onDelete: () => _deleteDua(dua),
