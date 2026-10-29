@@ -109,13 +109,13 @@ class _DuasPageState extends State<DuasPage> {
     });
   }
 
+
   Future<void> _scrollToLastReadDua() async {
     if (lastReadDuaId == null) return;
 
     final state = context.read<DuaCubit>().state;
     if (state is! DuaLoaded) return;
 
-    // إظهار الدعاء حتى لو كان البحث يخفيه.
     if (_searchQuery.isNotEmpty) {
       _searchController.clear();
 
@@ -128,14 +128,23 @@ class _DuasPageState extends State<DuasPage> {
 
     if (!mounted || !_scrollController.hasClients) return;
 
-    final targetIndex = state.duas.indexWhere(
+    final duas = state.duas;
+
+    final targetIndex = duas.indexWhere(
           (dua) => dua.id == lastReadDuaId,
     );
 
-    if (targetIndex == -1) return;
+    if (targetIndex == -1) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('الدعاء المحفوظ غير موجود في القائمة.'),
+        ),
+      );
+      return;
+    }
 
-    final targetKey = _duaKeys[lastReadDuaId!];
-    final targetContext = targetKey?.currentContext;
+    // إذا كان الدعاء موجودًا بالفعل ضمن العناصر المبنية.
+    final targetContext = _duaKeys[lastReadDuaId!]?.currentContext;
 
     if (targetContext != null) {
       await Scrollable.ensureVisible(
@@ -147,8 +156,9 @@ class _DuasPageState extends State<DuasPage> {
       return;
     }
 
-    // محاولة الوصول إلى العنصر بالتدريج.
-    for (int attempt = 0; attempt < 200; attempt++) {
+    // البحث عن الدعاء في الاتجاه الصحيح:
+    // للأعلى إذا كان قبل موضع القراءة، وللأسفل إذا كان بعده.
+    for (int attempt = 0; attempt < 300; attempt++) {
       if (!mounted || !_scrollController.hasClients) return;
 
       final itemContext =
@@ -164,22 +174,108 @@ class _DuasPageState extends State<DuasPage> {
         return;
       }
 
+      // تحديد العناصر التي تم بناؤها حاليًا.
+      final builtIndices = <int>[];
+
+      for (final entry in _duaKeys.entries) {
+        if (entry.value.currentContext == null) continue;
+
+        final index = duas.indexWhere(
+              (dua) => dua.id == entry.key,
+        );
+
+        if (index >= 0) {
+          builtIndices.add(index);
+        }
+      }
+
+      if (builtIndices.isEmpty) {
+        // لا توجد عناصر مبنية يمكن الاستدلال منها؛ نبدأ من الأعلى.
+        final position = _scrollController.position;
+
+        if (position.pixels > position.minScrollExtent) {
+          await _scrollController.animateTo(
+            position.minScrollExtent,
+            duration: const Duration(milliseconds: 250),
+            curve: Curves.easeOut,
+          );
+          await WidgetsBinding.instance.endOfFrame;
+          continue;
+        }
+
+        await WidgetsBinding.instance.endOfFrame;
+        continue;
+      }
+
+      builtIndices.sort();
+
+      final firstBuiltIndex = builtIndices.first;
+      final lastBuiltIndex = builtIndices.last;
+
       final position = _scrollController.position;
-      final remaining =
-          position.maxScrollExtent - position.pixels;
-
-      if (remaining <= 0) break;
-
       final step = math.max(
         100.0,
-        position.viewportDimension * 0.7,
+        position.viewportDimension * 0.6,
       );
 
-      await _scrollController.animateTo(
-        math.min(
-          position.pixels + step,
+      double nextOffset;
+
+      if (targetIndex < firstBuiltIndex) {
+        // الدعاء المطلوب أعلى العناصر المبنية؛ نتحرك للأعلى.
+        nextOffset = math.max(
+          position.minScrollExtent,
+          position.pixels - step,
+        );
+      } else if (targetIndex > lastBuiltIndex) {
+        // الدعاء المطلوب أسفل العناصر المبنية؛ نتحرك للأسفل.
+        nextOffset = math.min(
           position.maxScrollExtent,
-        ),
+          position.pixels + step,
+        );
+      } else {
+        // إذا كان الهدف بين العناصر المبنية، نتحرك حسب أقرب عنصر.
+        final nearestIndex = builtIndices.reduce(
+              (a, b) =>
+          (a - targetIndex).abs() <= (b - targetIndex).abs()
+              ? a
+              : b,
+        );
+
+        if (targetIndex < nearestIndex) {
+          nextOffset = math.max(
+            position.minScrollExtent,
+            position.pixels - step,
+          );
+        } else {
+          nextOffset = math.min(
+            position.maxScrollExtent,
+            position.pixels + step,
+          );
+        }
+      }
+
+      if ((nextOffset - position.pixels).abs() < 1) {
+        // وصلنا إلى طرف القائمة؛ نعطي Flutter فرصة لبناء العناصر.
+        await WidgetsBinding.instance.endOfFrame;
+
+        final finalContext =
+            _duaKeys[lastReadDuaId!]?.currentContext;
+
+        if (finalContext != null) {
+          await Scrollable.ensureVisible(
+            finalContext,
+            duration: const Duration(milliseconds: 500),
+            curve: Curves.easeInOut,
+            alignment: 0.15,
+          );
+          return;
+        }
+
+        break;
+      }
+
+      await _scrollController.animateTo(
+        nextOffset,
         duration: const Duration(milliseconds: 120),
         curve: Curves.linear,
       );
@@ -189,6 +285,20 @@ class _DuasPageState extends State<DuasPage> {
 
     if (!mounted) return;
 
+    // محاولة أخيرة إذا أصبح العنصر متاحًا.
+    final finalContext =
+        _duaKeys[lastReadDuaId!]?.currentContext;
+
+    if (finalContext != null) {
+      await Scrollable.ensureVisible(
+        finalContext,
+        duration: const Duration(milliseconds: 500),
+        curve: Curves.easeInOut,
+        alignment: 0.15,
+      );
+      return;
+    }
+
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text(
@@ -197,6 +307,7 @@ class _DuasPageState extends State<DuasPage> {
       ),
     );
   }
+
 
   Future<void> _startAutoScroll() async {
     if (_isAutoScrolling || _isScrollLoopRunning) return;
